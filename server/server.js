@@ -30,7 +30,13 @@ app.use(
   }),
 );
 
-app.use(express.json());
+const authUser = (req, res, next) => {
+  if (!req.session.userId) {
+    return res.status(401).json({ message: "Please log in" });
+  }
+  next();
+};
+
 const result = await pool.query("SELECT NOW()");
 console.log(result.rows[0]);
 
@@ -71,7 +77,12 @@ app.post("/api/auth/register", async (req, res) => {
       user: result.rows[0],
     });
   } catch (err) {
-    // console.error(err);
+    if (err.code === "23505") {
+      return res.status(409).json({
+        message: "Email is already registered",
+      });
+    }
+    console.error(err);
     return res.status(500).json({
       message: "Something went wrong",
     });
@@ -111,12 +122,12 @@ app.post("/api/auth/login", async (req, res) => {
     req.session.regenerate((err) => {
       if (err) {
         console.error(err);
-        return res.status(500).json({ message: "something went wrong" });
+        return res.status(500).json({ message: "Something went wrong" });
       }
       req.session.userId = user.id;
       return res.status(200).json({
         status: "success",
-        message: "Login successfull",
+        message: "Login successful",
         user: {
           id: user.id,
           username: user.username,
@@ -132,13 +143,7 @@ app.post("/api/auth/login", async (req, res) => {
   }
 });
 
-app.get("/api/auth/me", async (req, res) => {
-  if (!req.session.userId) {
-    return res.status(401).json({
-      message: "Not logged in",
-    });
-  }
-
+app.get("/api/auth/me", authUser, async (req, res) => {
   try {
     const result = await pool.query(
       "SELECT id, username, email FROM users WHERE id = $1",
@@ -146,7 +151,10 @@ app.get("/api/auth/me", async (req, res) => {
     );
 
     if (result.rows.length === 0) {
-      return res.status(401).json({ message: "Not logged in" });
+      return req.session.destroy(() => {
+        res.clearCookie("connect.sid");
+        res.status(401).json({ message: "Not logged in" });
+      });
     }
 
     return res.status(200).json({ user: result.rows[0] });
@@ -166,6 +174,175 @@ app.post("/api/auth/logout", (req, res) => {
     res.clearCookie("connect.sid");
     return res.status(200).json({ message: "Logged out" });
   });
+});
+
+app.get("/api/books", authUser, async (req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM books WHERE user_id = $1", [
+      req.session.userId,
+    ]);
+
+    const library = result.rows;
+
+    return res.status(200).json({
+      status: "success",
+      books: library,
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({
+      message: "Something went wrong",
+    });
+  }
+});
+
+app.get("/api/books", authUser, async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT * FROM books WHERE is_favorite = true AND user_id = $1 ORDER BY title",
+      [req.session.userId],
+    );
+
+    return res.status(200).json({
+      status: "success",
+      books: result.rows,
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: "Something went wrong" });
+  }
+});
+
+app.get("/api/books/search", authUser, async (req, res) => {
+  try {
+    const title = req.query.q?.trim();
+    const genre = req.query.genre?.trim();
+    const user = req.session.userId;
+
+    let result;
+    if (title) {
+      result = await pool.query(
+        "SELECT * FROM books WHERE user_id = $1 AND books.title  ILIKE  $2 ORDER BY books.title",
+        [user, `%${title}%`],
+      );
+    } else if (genre) {
+      result = await pool.query(
+        "SELECT * FROM books WHERE user_id = $1 AND books.genre  ILIKE  $2 ORDER BY books.genre",
+        [user, genre],
+      );
+    } else {
+      return res.status(400).json({ message: "Please provide a search term" });
+    }
+
+    return res.status(200).json({
+      status: "success",
+      books: result.rows,
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: "Something went wrong" });
+  }
+});
+
+app.get("/api/books/:id", authUser, async (req, res) => {
+  try {
+    const book = Number(req.params.id);
+    const user = req.session.userId;
+
+    if (!book || book <= 0) {
+      return res.status(400).json({ message: "Enter a valid book id" });
+    }
+
+    const result = await pool.query(
+      "SELECT * FROM books WHERE books.id = $1 AND books.user_id = $2",
+      [book, user],
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: "Book not found" });
+    }
+
+    return res.status(200).json({ status: "success", book: result.rows[0] });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: "Something went wrong" });
+  }
+});
+
+app.patch("/api/books/:id", authUser, async (req, res) => {
+  try {
+    const bookId = Number(req.params.id);
+    const user = req.session.userId;
+    const { favorite, rating, currentPage } = req.body;
+
+    if (!bookId || bookId <= 0) {
+      return res.status(400).json({ message: "enter a valid book id" });
+    }
+    const result = await pool.query(
+      `UPDATE books SET is_favorite = COALESCE ($1, is_favorite), rating = COALESCE ($2, rating), current_page = COALESCE($3, current_page) WHERE books.id = $4 AND books.user_id = $5 RETURNING *`,
+      [favorite ?? null, rating ?? null, currentPage ?? null, bookId, user],
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: "Book not found" });
+    }
+
+    return res.status(200).json({
+      status: "success",
+      book: result.rows[0],
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: "Something went wrong" });
+  }
+});
+
+app.delete("/api/books/:id", authUser, async (req, res) => {
+  try {
+    const bookId = Number(req.params.id);
+    const user = req.session.userId;
+
+    if (!bookId || bookId <= 0) {
+      return res.status(400).json({ message: "Enter valid book id" });
+    }
+
+    const result = await pool.query(
+      "DELETE FROM books WHERE books.id = $1 AND user_id = $2 RETURNING id",
+      [bookId, user],
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: "Book not found" });
+    }
+
+    return res
+      .status(200)
+      .json({ status: "success", deletedBookId: result.rows[0].id });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: "Something went wrong" });
+  }
+});
+
+app.post("/api/books", authUser, async (req, res) => {
+  const {
+    title,
+    author,
+    genre,
+    description,
+    pages,
+    language,
+    publishYear,
+    favorite = false,
+    rating,
+    currentPage = 0,
+  } = req.body;
+  title.trim();
+  if (!title) {
+    return res.status(400).json({ message: "Please include a book title" });
+  }
+
+  const result = await pool.query("INSERT INTO books title,author,");
 });
 
 app.listen(port, () => {
