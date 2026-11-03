@@ -38,12 +38,8 @@ const authUser = (req, res, next) => {
 };
 
 const result = await pool.query("SELECT NOW()");
-console.log(result.rows[0]);
 
-app.get("/test-session", (req, res) => {
-  req.session.views = (req.session.views || 0) + 1;
-  res.json({ views: req.session.views });
-});
+//POST
 
 app.post("/api/auth/register", async (req, res) => {
   console.log("NEW REGISTRATION ROUTE HIT");
@@ -143,6 +139,64 @@ app.post("/api/auth/login", async (req, res) => {
   }
 });
 
+app.post("/api/auth/logout", (req, res) => {
+  req.session.destroy((err) => {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ message: "Something went wrong" });
+    }
+
+    res.clearCookie("connect.sid");
+    return res.status(200).json({ message: "Logged out" });
+  });
+});
+
+app.post("/api/books", authUser, async (req, res) => {
+  try {
+    const {
+      title,
+      author,
+      genre,
+      description,
+      pages,
+      language,
+      publishYear,
+      favorite = false,
+      rating,
+      currentPage = 0,
+    } = req.body;
+    const cleanTitle = title?.trim();
+    if (!cleanTitle) {
+      return res.status(400).json({ message: "Please include a book title" });
+    }
+    const user = req.session.userId;
+
+    const result = await pool.query(
+      "INSERT INTO books (user_id, title,author,genre, description, pages, language,publish_year,is_favorite,rating,current_page) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *",
+      [
+        user,
+        cleanTitle,
+        author,
+        genre,
+        description,
+        pages,
+        language,
+        publishYear,
+        favorite,
+        rating,
+        currentPage,
+      ],
+    );
+
+    return res.status(201).json({ status: "success", book: result.rows[0] });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: "Something went wrong" });
+  }
+});
+
+//GET
+
 app.get("/api/auth/me", authUser, async (req, res) => {
   try {
     const result = await pool.query(
@@ -164,23 +218,12 @@ app.get("/api/auth/me", authUser, async (req, res) => {
   }
 });
 
-app.post("/api/auth/logout", (req, res) => {
-  req.session.destroy((err) => {
-    if (err) {
-      console.error(err);
-      return res.status(500).json({ message: "Something went wrong" });
-    }
-
-    res.clearCookie("connect.sid");
-    return res.status(200).json({ message: "Logged out" });
-  });
-});
-
 app.get("/api/books", authUser, async (req, res) => {
   try {
-    const result = await pool.query("SELECT * FROM books WHERE user_id = $1", [
-      req.session.userId,
-    ]);
+    const result = await pool.query(
+      "SELECT * FROM books WHERE user_id = $1 ORDER BY title",
+      [req.session.userId],
+    );
 
     const library = result.rows;
 
@@ -193,23 +236,6 @@ app.get("/api/books", authUser, async (req, res) => {
     return res.status(500).json({
       message: "Something went wrong",
     });
-  }
-});
-
-app.get("/api/books", authUser, async (req, res) => {
-  try {
-    const result = await pool.query(
-      "SELECT * FROM books WHERE is_favorite = true AND user_id = $1 ORDER BY title",
-      [req.session.userId],
-    );
-
-    return res.status(200).json({
-      status: "success",
-      books: result.rows,
-    });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ message: "Something went wrong" });
   }
 });
 
@@ -269,6 +295,8 @@ app.get("/api/books/:id", authUser, async (req, res) => {
   }
 });
 
+//PATCH
+
 app.patch("/api/books/:id", authUser, async (req, res) => {
   try {
     const bookId = Number(req.params.id);
@@ -297,6 +325,8 @@ app.patch("/api/books/:id", authUser, async (req, res) => {
   }
 });
 
+//DELETE
+
 app.delete("/api/books/:id", authUser, async (req, res) => {
   try {
     const bookId = Number(req.params.id);
@@ -322,27 +352,6 @@ app.delete("/api/books/:id", authUser, async (req, res) => {
     console.error(err);
     return res.status(500).json({ message: "Something went wrong" });
   }
-});
-
-app.post("/api/books", authUser, async (req, res) => {
-  const {
-    title,
-    author,
-    genre,
-    description,
-    pages,
-    language,
-    publishYear,
-    favorite = false,
-    rating,
-    currentPage = 0,
-  } = req.body;
-  title.trim();
-  if (!title) {
-    return res.status(400).json({ message: "Please include a book title" });
-  }
-
-  const result = await pool.query("INSERT INTO books title,author,");
 });
 
 app.listen(port, () => {
