@@ -39,6 +39,47 @@ const authUser = (req, res, next) => {
 
 const result = await pool.query("SELECT NOW()");
 
+app.get("/api/lookup", authUser, async (req, res) => {
+  try {
+    const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+
+    if (!q) {
+      return res.status(400).json({ message: "Please provide a search term" });
+    }
+
+    const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(`intitle:${q}`)}&maxResults=10&key=${process.env.GOOGLE_BOOKS_KEY}`;
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      console.error("google book error:", response.status);
+      return res.status(502).json({ message: "Book lookup failed" });
+    }
+
+    const data = await response.json();
+
+    const books = (data.items ?? []).map((item) => {
+      const info = item.volumeInfo;
+      return {
+        googleId: item.id,
+        title: info.title,
+        author: info.authors?.join(", "),
+        genre: info.categories?.[0],
+        description: info.description,
+        pages: info.pageCount,
+        language: info.language,
+        publishYear: info.publishedDate
+          ? Number(info.publishedDate.slice(0, 4))
+          : undefined,
+        thumbnail: info.imageLinks?.thumbnail,
+      };
+    });
+    return res.status(200).json({ status: "success", books });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: "Something went wrong" });
+  }
+});
+
 //POST
 
 app.post("/api/auth/register", async (req, res) => {
