@@ -37,9 +37,36 @@ const authUser = (req, res, next) => {
   next();
 };
 
-const result = await pool.query("SELECT NOW()");
+const cleanBookInfo = (item) => {
+  const info = item.volumeInfo;
+  return {
+    googleId: item.id,
+    title: info.title,
+    author: info.authors?.join(", "),
+    genre: info.categories?.[0],
+    description: info.description,
+    pages: info.pageCount,
+    language: info.language,
+    publishYear: info.publishedDate
+      ? Number(info.publishedDate.slice(0, 4))
+      : undefined,
+    thumbnail: info.imageLinks?.thumbnail?.replace(/^http:/, "https:"),
+  };
+};
 
-app.get("/api/lookup", authUser, async (req, res) => {
+const shuffle = (arr) => {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+};
+
+const result = await pool.query("SELECT NOW()");
+console.log(result);
+
+app.get("/api/lookup", async (req, res) => {
   try {
     const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
 
@@ -47,7 +74,7 @@ app.get("/api/lookup", authUser, async (req, res) => {
       return res.status(400).json({ message: "Please provide a search term" });
     }
 
-    const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(`intitle:${q}`)}&maxResults=10&key=${process.env.GOOGLE_BOOKS_KEY}`;
+    const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(`${q}`)}&maxResults=4&key=${process.env.GOOGLE_BOOKS_KEY}`;
     const response = await fetch(url);
 
     if (!response.ok) {
@@ -57,26 +84,98 @@ app.get("/api/lookup", authUser, async (req, res) => {
 
     const data = await response.json();
 
-    const books = (data.items ?? []).map((item) => {
-      const info = item.volumeInfo;
-      return {
-        googleId: item.id,
-        title: info.title,
-        author: info.authors?.join(", "),
-        genre: info.categories?.[0],
-        description: info.description,
-        pages: info.pageCount,
-        language: info.language,
-        publishYear: info.publishedDate
-          ? Number(info.publishedDate.slice(0, 4))
-          : undefined,
-        thumbnail: info.imageLinks?.thumbnail,
-      };
-    });
+    const books = (data.items ?? []).map(cleanBookInfo);
     return res.status(200).json({ status: "success", books });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ message: "Something went wrong" });
+  }
+});
+
+app.get("/api/discover", async (req, res) => {
+  const DISCOVER_SUBJECTS = [
+    "fiction",
+    "mystery",
+    "fantasy",
+    "science fiction",
+    "romance",
+    "history",
+    "poetry",
+    "horror",
+    "travel",
+    "philosophy",
+    "biography & autobiography",
+    "true crime",
+    "humor",
+    "science",
+    "art",
+  ];
+
+  try {
+    const subject =
+      DISCOVER_SUBJECTS[Math.floor(Math.random() * DISCOVER_SUBJECTS.length)];
+    const fetchBooks = async (startIndex) => {
+      const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(`subject:"${subject}"`)}&startIndex=${startIndex}&maxResults=40&key=${process.env.GOOGLE_BOOKS_KEY}`;
+      const response = await fetch(url);
+      if (!response.ok)
+        throw new Error(`Google Books error: ${response.status}`);
+      const data = await response.json();
+      return (data.items ?? []).map(cleanBookInfo);
+    };
+    let books = await fetchBooks(Math.floor(Math.random() * 100));
+    if (books.length === 0) books = await fetchBooks(0);
+    const ownedIds = new Set();
+    if (req.session.userId) {
+      const owned = await pool.query(
+        "SELECT google_id FROM books WHERE user_id = $1 AND google_id IS NOT NULL",
+        [req.session.userId],
+      );
+      owned.rows.forEach((r) => ownedIds.add(r.google_id));
+    }
+
+    const seen = new Set();
+    const fresh = books.filter((b) => {
+      if (!b.thumbnail || ownedIds.has(b.googleId) || seen.has(b.googleId)) {
+        return false;
+      }
+      seen.add(b.googleId);
+      return true;
+    });
+    return res
+      .status(200)
+      .json({ status: "success", subject, books: shuffle(fresh).slice(0, 12) });
+  } catch (err) {
+    console.error(err);
+    return res.status(502).json({ message: "Discover failed" });
+  }
+});
+
+app.get("/api/genre", async (req, res) => {
+  try {
+    const genre = typeof req.query.q === "string" ? req.query.q.trim() : "";
+
+    if (!genre) {
+      return res.status(400).json({ message: "Please provide a genre" });
+    }
+
+    const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(`subject:"${genre}"`)}&maxResults=40&key=${process.env.GOOGLE_BOOKS_KEY}`;
+
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      return res
+        .status(response.status)
+        .json({ message: "Google books request failed" });
+    }
+
+    const data = await response.json();
+
+    const books = (data.items ?? []).map(cleanBookInfo);
+
+    return res.status(200).json({ status: "success", books });
+  } catch (err) {
+    console.error("here bro");
+    res.status(500).json({ message: "Something went wrong" });
   }
 });
 
@@ -195,6 +294,8 @@ app.post("/api/auth/logout", (req, res) => {
 app.post("/api/books", authUser, async (req, res) => {
   try {
     const {
+      googleId,
+      thumbnail,
       title,
       author,
       genre,
@@ -213,9 +314,11 @@ app.post("/api/books", authUser, async (req, res) => {
     const user = req.session.userId;
 
     const result = await pool.query(
-      "INSERT INTO books (user_id, title,author,genre, description, pages, language,publish_year,is_favorite,rating,current_page) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *",
+      `INSERT INTO books (user_id, google_id, url, title, author, genre, description, pages, language, publish_year, is_favorite, rating, current_page) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
       [
         user,
+        googleId,
+        thumbnail,
         cleanTitle,
         author,
         genre,
@@ -231,6 +334,11 @@ app.post("/api/books", authUser, async (req, res) => {
 
     return res.status(201).json({ status: "success", book: result.rows[0] });
   } catch (err) {
+    if (err.code === "23505") {
+      return res
+        .status(409)
+        .json({ message: "Book is already in your library" });
+    }
     console.error(err);
     return res.status(500).json({ message: "Something went wrong" });
   }
@@ -282,8 +390,9 @@ app.get("/api/books", authUser, async (req, res) => {
 
 app.get("/api/books/search", authUser, async (req, res) => {
   try {
-    const title = req.query.q?.trim();
-    const genre = req.query.genre?.trim();
+    const title = typeof req.query.q === "string" ? req.query.q.trim() : "";
+    const genre =
+      typeof req.query.genre === "string" ? req.query.genre.trim() : "";
     const user = req.session.userId;
 
     let result;
@@ -295,7 +404,7 @@ app.get("/api/books/search", authUser, async (req, res) => {
     } else if (genre) {
       result = await pool.query(
         "SELECT * FROM books WHERE user_id = $1 AND books.genre  ILIKE  $2 ORDER BY books.genre",
-        [user, genre],
+        [user, `%${genre}%`],
       );
     } else {
       return res.status(400).json({ message: "Please provide a search term" });
