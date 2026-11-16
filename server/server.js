@@ -134,16 +134,20 @@ app.get("/api/discover", async (req, res) => {
     }
 
     const seen = new Set();
-    const fresh = books.filter((b) => {
-      if (!b.thumbnail || ownedIds.has(b.googleId) || seen.has(b.googleId)) {
+    const fresh = books.filter((book) => {
+      if (
+        !book.thumbnail ||
+        ownedIds.has(book.googleId) ||
+        seen.has(book.googleId)
+      ) {
         return false;
       }
-      seen.add(b.googleId);
+      seen.add(book.googleId);
       return true;
     });
     return res
       .status(200)
-      .json({ status: "success", subject, books: shuffle(fresh).slice(0, 12) });
+      .json({ status: "success", subject, books: shuffle(fresh).slice(0, 39) });
   } catch (err) {
     console.error(err);
     return res.status(502).json({ message: "Discover failed" });
