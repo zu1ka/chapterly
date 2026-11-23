@@ -4,6 +4,8 @@ import pool from "./db.js";
 import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
 import bcrypt from "bcrypt";
+import crypto from "crypto";
+import nodemailer from "nodemailer";
 
 const pgSessions = connectPgSimple(session);
 const app = express();
@@ -51,8 +53,25 @@ const cleanBookInfo = (item) => {
       ? Number(info.publishedDate.slice(0, 4))
       : undefined,
     thumbnail: info.imageLinks?.thumbnail?.replace(/^http:/, "https:"),
+    categories: info.categories ?? [],
   };
 };
+
+const BOOK_COLUMNS = `
+  id,
+  google_id AS "googleId",
+  url AS thumbnail,
+  title,
+  author,
+  genre,
+  description,
+  pages,
+  language,
+  publish_year AS "publishYear",
+  is_favorite AS favorite,
+  rating,
+  current_page AS "currentPage"
+`;
 
 const shuffle = (arr) => {
   const a = [...arr];
@@ -61,6 +80,55 @@ const shuffle = (arr) => {
     [a[i], a[j]] = [a[j], a[i]];
   }
   return a;
+};
+
+const hashToken = (token) =>
+  crypto.createHash("sha256").update(token).digest("hex");
+
+const mailer =
+  process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD
+    ? nodemailer.createTransport({
+        service: "gmail",
+        auth: {
+          user: process.env.GMAIL_USER,
+          pass: process.env.GMAIL_APP_PASSWORD,
+        },
+      })
+    : null;
+
+const sendResetEmail = async (to, resetLink) => {
+  if (!mailer) {
+    console.log("Password reset link:", resetLink);
+    return;
+  }
+
+  try {
+    await mailer.sendMail({
+      from: `Chapterly <${process.env.GMAIL_USER}>`,
+      to,
+      subject: "Reset your Chapterly password",
+      text: `We got a request to reset your Chapterly password.
+
+Open this link to choose a new one:
+${resetLink}
+
+The link expires in 1 hour. If you didn't ask for this, you can ignore this email.`,
+      html: `
+        <div style="font-family: system-ui, sans-serif; max-width: 480px; color: #1c2233;">
+          <h2>Reset your password</h2>
+          <p>We got a request to reset your Chapterly password. Click the button below to choose a new one.</p>
+          <p>
+            <a href="${resetLink}" style="display: inline-block; padding: 12px 24px; background: #3e3566; color: #ffffff; text-decoration: none; border-radius: 10px; font-weight: 700;">
+              Reset password
+            </a>
+          </p>
+          <p style="color: #6b7186; font-size: 14px;">This link expires in 1 hour. If you didn't ask for this, you can ignore this email.</p>
+        </div>
+      `,
+    });
+  } catch (err) {
+    console.error("Reset email failed:", err.message);
+  }
 };
 
 const result = await pool.query("SELECT NOW()");
@@ -74,7 +142,7 @@ app.get("/api/lookup", async (req, res) => {
       return res.status(400).json({ message: "Please provide a search term" });
     }
 
-    const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(`${q}`)}&maxResults=4&key=${process.env.GOOGLE_BOOKS_KEY}`;
+    const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(`${q}`)}&maxResults=39&key=${process.env.GOOGLE_BOOKS_KEY}`;
     const response = await fetch(url);
 
     if (!response.ok) {
@@ -115,7 +183,14 @@ app.get("/api/discover", async (req, res) => {
     const subject =
       DISCOVER_SUBJECTS[Math.floor(Math.random() * DISCOVER_SUBJECTS.length)];
     const fetchBooks = async (startIndex) => {
-      const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(`subject:"${subject}"`)}&startIndex=${startIndex}&maxResults=40&key=${process.env.GOOGLE_BOOKS_KEY}`;
+      const url =
+        "https://www.googleapis.com/books/v1/volumes?q=" +
+        encodeURIComponent('subject:"' + subject + '"') +
+        "&startIndex=" +
+        startIndex +
+        "&maxResults=40&key=" +
+        process.env.GOOGLE_BOOKS_KEY;
+
       const response = await fetch(url);
       if (!response.ok)
         throw new Error(`Google Books error: ${response.status}`);
@@ -178,7 +253,7 @@ app.get("/api/genre", async (req, res) => {
 
     return res.status(200).json({ status: "success", books });
   } catch (err) {
-    console.error("here bro");
+    console.error(err);
     res.status(500).json({ message: "Something went wrong" });
   }
 });
@@ -186,7 +261,6 @@ app.get("/api/genre", async (req, res) => {
 //POST
 
 app.post("/api/auth/register", async (req, res) => {
-  console.log("NEW REGISTRATION ROUTE HIT");
   const { username, email, password } = req.body;
 
   try {
@@ -196,16 +270,31 @@ app.post("/api/auth/register", async (req, res) => {
       });
     }
 
+    if (username.includes("@")) {
+      return res.status(400).json({
+        message: "Usernames can't contain @",
+      });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({
+        message: "Password must be at least 8 characters",
+      });
+    }
+
     const existingUser = await pool.query(
-      "SELECT * FROM users WHERE email = $1",
-      [email],
+      "SELECT email, username FROM users WHERE email = $1 OR username = $2",
+      [email, username],
     );
 
     if (existingUser.rows.length > 0) {
-      return res.status(409).json({
-        message: "Email is already registered",
-      });
+      const message =
+        existingUser.rows[0].email === email
+          ? "Email is already registered"
+          : "Username is already taken";
+      return res.status(409).json({ message });
     }
+
     const hashedPassword = await bcrypt.hash(password, 12);
 
     const result = await pool.query(
@@ -219,7 +308,7 @@ app.post("/api/auth/register", async (req, res) => {
   } catch (err) {
     if (err.code === "23505") {
       return res.status(409).json({
-        message: "Email is already registered",
+        message: "Email or username is already taken",
       });
     }
     console.error(err);
@@ -231,16 +320,19 @@ app.post("/api/auth/register", async (req, res) => {
 
 app.post("/api/auth/login", async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { identifier, password } = req.body;
+    const cleanIdentifier = identifier?.trim();
 
-    if (!email || !password) {
-      return res.status(400).json({
-        message: "Please fill out all required fields",
-      });
+    if (!cleanIdentifier || !password) {
+      return res
+        .status(400)
+        .json({ message: "Please fill out all required fields" });
     }
-    const result = await pool.query("SELECT * FROM users WHERE email = $1", [
-      email,
-    ]);
+
+    const result = await pool.query(
+      "SELECT * FROM users WHERE email = $1 OR username = $1",
+      [cleanIdentifier],
+    );
 
     if (result.rows.length === 0) {
       return res.status(401).json({
@@ -293,6 +385,97 @@ app.post("/api/auth/logout", (req, res) => {
     res.clearCookie("connect.sid");
     return res.status(200).json({ message: "Logged out" });
   });
+});
+
+app.post("/api/auth/forgot-password", async (req, res) => {
+  const email = typeof req.body.email === "string" ? req.body.email.trim() : "";
+  const sentMessage = {
+    message: "If that email is registered, a reset link is on its way.",
+  };
+
+  if (!email) {
+    return res.status(400).json({ message: "Please provide your email" });
+  }
+
+  try {
+    const result = await pool.query("SELECT id FROM users WHERE email = $1", [
+      email,
+    ]);
+
+    if (result.rows.length === 0) {
+      return res.status(200).json(sentMessage);
+    }
+
+    const userId = result.rows[0].id;
+    const token = crypto.randomBytes(32).toString("hex");
+
+    await pool.query("DELETE FROM password_resets WHERE user_id = $1", [
+      userId,
+    ]);
+    await pool.query(
+      "INSERT INTO password_resets (user_id, token_hash, expires_at) VALUES ($1, $2, NOW() + INTERVAL '1 hour')",
+      [userId, hashToken(token)],
+    );
+
+    const resetLink = process.env.APP_URL + "/?reset=" + token;
+    await sendResetEmail(email, resetLink);
+
+    return res.status(200).json(sentMessage);
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: "Something went wrong" });
+  }
+});
+
+app.post("/api/auth/reset-password", async (req, res) => {
+  const { token, password } = req.body;
+
+  if (!token || !password) {
+    return res
+      .status(400)
+      .json({ message: "Please provide a token and a new password" });
+  }
+
+  if (password.length < 8) {
+    return res
+      .status(400)
+      .json({ message: "Password must be at least 8 characters" });
+  }
+
+  try {
+    const result = await pool.query(
+      "SELECT id, user_id FROM password_resets WHERE token_hash = $1 AND used_at IS NULL AND expires_at > NOW()",
+      [hashToken(token)],
+    );
+
+    if (result.rows.length === 0) {
+      return res
+        .status(400)
+        .json({ message: "This reset link is invalid or has expired" });
+    }
+
+    const { id, user_id } = result.rows[0];
+    const hashedPassword = await bcrypt.hash(password, 12);
+
+    await pool.query("UPDATE users SET password_hash = $1 WHERE id = $2", [
+      hashedPassword,
+      user_id,
+    ]);
+    await pool.query(
+      "UPDATE password_resets SET used_at = NOW() WHERE id = $1",
+      [id],
+    );
+    await pool.query("DELETE FROM user_sessions WHERE sess->>'userId' = $1", [
+      String(user_id),
+    ]);
+
+    return res
+      .status(200)
+      .json({ message: "Password updated. You can log in now." });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: "Something went wrong" });
+  }
 });
 
 app.post("/api/books", authUser, async (req, res) => {
@@ -374,7 +557,7 @@ app.get("/api/auth/me", authUser, async (req, res) => {
 app.get("/api/books", authUser, async (req, res) => {
   try {
     const result = await pool.query(
-      "SELECT * FROM books WHERE user_id = $1 ORDER BY title",
+      `SELECT ${BOOK_COLUMNS} FROM books WHERE user_id = $1 ORDER BY title`,
       [req.session.userId],
     );
 
@@ -383,6 +566,25 @@ app.get("/api/books", authUser, async (req, res) => {
     return res.status(200).json({
       status: "success",
       books: library,
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({
+      message: "Something went wrong",
+    });
+  }
+});
+
+app.get("/api/favorites", authUser, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT ${BOOK_COLUMNS} FROM books WHERE user_id = $1 AND is_favorite = true ORDER BY title`,
+      [req.session.userId],
+    );
+
+    return res.status(200).json({
+      status: "success",
+      books: result.rows,
     });
   } catch (err) {
     console.error(err);
@@ -402,8 +604,9 @@ app.get("/api/books/search", authUser, async (req, res) => {
     let result;
     if (title) {
       result = await pool.query(
-        "SELECT * FROM books WHERE user_id = $1 AND books.title  ILIKE  $2 ORDER BY books.title",
-        [user, `%${title}%`],
+        ` SELECT ${BOOK_COLUMNS} books WHERE user_id = $1 AND books.title  ILIKE  $2 ORDER BY books.title,`[
+          (user, `%${title}%`)
+        ],
       );
     } else if (genre) {
       result = await pool.query(
@@ -434,7 +637,7 @@ app.get("/api/books/:id", authUser, async (req, res) => {
     }
 
     const result = await pool.query(
-      "SELECT * FROM books WHERE books.id = $1 AND books.user_id = $2",
+      `SELECT  ${BOOK_COLUMNS} FROM books WHERE books.id = $1 AND books.user_id = $2`,
       [book, user],
     );
 
@@ -461,7 +664,7 @@ app.patch("/api/books/:id", authUser, async (req, res) => {
       return res.status(400).json({ message: "enter a valid book id" });
     }
     const result = await pool.query(
-      `UPDATE books SET is_favorite = COALESCE ($1, is_favorite), rating = COALESCE ($2, rating), current_page = COALESCE($3, current_page) WHERE books.id = $4 AND books.user_id = $5 RETURNING *`,
+      `UPDATE books SET is_favorite = COALESCE($1,is_favorite),rating=COALESCE($2, rating), current_page = COALESCE($3, current_page) WHERE books.id = $4 AND books.user_id = $5 RETURNING *`,
       [favorite ?? null, rating ?? null, currentPage ?? null, bookId, user],
     );
 
