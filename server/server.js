@@ -1,4 +1,6 @@
 import "dotenv/config";
+import path from "path";
+import { fileURLToPath } from "url";
 import express from "express";
 import pool from "./db.js";
 import session from "express-session";
@@ -9,7 +11,7 @@ import nodemailer from "nodemailer";
 
 const pgSessions = connectPgSimple(session);
 const app = express();
-const port = 3000;
+const port = process.env.PORT || 3000;
 app.set("trust proxy", 1);
 app.use(express.json());
 
@@ -709,6 +711,14 @@ app.delete("/api/books/:id", authUser, async (req, res) => {
     console.error(err);
     return res.status(500).json({ message: "Something went wrong" });
   }
+});
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const clientDist = path.join(__dirname, "../client/dist");
+app.use(express.static(clientDist));
+app.use((req, res, next) => {
+  if (req.method !== "GET" || req.path.startsWith("/api")) return next();
+  res.sendFile(path.join(clientDist, "index.html"));
 });
 
 app.listen(port, () => {
